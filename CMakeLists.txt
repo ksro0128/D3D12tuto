@@ -10,5 +10,13 @@ add_definitions(-DUNICODE -D_UNICODE)
 # Win32 GUI 앱으로 설정!
 add_executable(DirectXWindow WIN32 main.cpp)
 
-# 윈도우 관련 라이브러리
-target_link_libraries(DirectXWindow PRIVATE user32 gdi32)
+# 윈도우 관련 라이브러리 링크
+target_link_libraries(DirectXWindow
+    PRIVATE
+    user32
+    gdi32
+    d3d12
+    dxgi
+    dxguid
+    d3dcompiler
+)
