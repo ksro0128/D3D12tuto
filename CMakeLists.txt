@@ -7,8 +7,13 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # 유니코드 설정
 add_definitions(-DUNICODE -D_UNICODE)
 
-# Win32 GUI 앱으로 설정!
-add_executable(DirectXWindow WIN32 main.cpp)
+add_compile_options("$<$<CXX_COMPILER_ID:MSVC>:/utf-8>")
+
+# Win32 GUI 앱으로 설정
+add_executable(DirectXWindow WIN32 main.cpp
+                App.cpp
+                Window.cpp
+                Renderer.cpp)
 
 # 윈도우 관련 라이브러리 링크
 target_link_libraries(DirectXWindow
