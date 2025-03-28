@@ -4,6 +4,17 @@
 #include <d3d12.h>
 #include <dxgi1_6.h>
 #include <wrl.h>
+#include <DirectXMath.h>
+
+using namespace DirectX;
+
+struct alignas(256) MVP
+{
+    XMMATRIX model;
+    XMMATRIX view;
+    XMMATRIX projection;
+};
+
 
 class Renderer {
 public:
@@ -46,6 +57,11 @@ private:
     // 윈도우 크기
     UINT windowWidth = 1280;
     UINT windowHeight = 720;
+
+    // 상수 버퍼
+    Microsoft::WRL::ComPtr<ID3D12Resource> constantBuffer;
+    UINT8* constantBufferPtr = nullptr;
+    MVP mvpData = {};
 
 
     bool createPipeline();

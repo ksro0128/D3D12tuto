@@ -1,22 +1,31 @@
-// vertex shader
+cbuffer MVPBuffer : register(b0)
+{
+    matrix model;
+    matrix view;
+    matrix projection;
+};
+
 struct VSInput {
     float3 position : POSITION;
     float3 color : COLOR;
 };
 
-struct PSInput {
+struct VSOutput {
     float4 position : SV_POSITION;
     float3 color : COLOR;
 };
 
-PSInput VSMain(VSInput input) {
-    PSInput output;
-    output.position = float4(input.position, 1.0f);
+VSOutput VSMain(VSInput input) {
+    VSOutput output;
+
+    float4 worldPos = mul(float4(input.position, 1.0f), model);
+    float4 viewPos  = mul(worldPos, view);
+    output.position = mul(viewPos, projection);
+
     output.color = input.color;
     return output;
 }
 
-// pixel shader
-float4 PSMain(PSInput input) : SV_TARGET {
+float4 PSMain(VSOutput input) : SV_TARGET {
     return float4(input.color, 1.0f);
 }

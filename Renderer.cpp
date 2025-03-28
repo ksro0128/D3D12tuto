@@ -84,6 +84,23 @@ bool Renderer::initialize(HWND hwnd) {
     fenceValue = 1;
     fenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
 
+    // 상수 버퍼 생성
+    CD3DX12_HEAP_PROPERTIES heapProps(D3D12_HEAP_TYPE_UPLOAD);
+    CD3DX12_RESOURCE_DESC cbDesc = CD3DX12_RESOURCE_DESC::Buffer((sizeof(MVP) + 255) & ~255);
+
+    device->CreateCommittedResource(
+        &heapProps,
+        D3D12_HEAP_FLAG_NONE,
+        &cbDesc,
+        D3D12_RESOURCE_STATE_GENERIC_READ,
+        nullptr,
+        IID_PPV_ARGS(&constantBuffer)
+    );
+
+    // 매핑 (CPU에서 직접 접근 가능하게 함)
+    CD3DX12_RANGE readRange(0, 0);
+    constantBuffer->Map(0, &readRange, reinterpret_cast<void**>(&constantBufferPtr));
+
     // 파이프라인 생성
     if (!createPipeline()) return false;
 
@@ -97,7 +114,16 @@ bool Renderer::initialize(HWND hwnd) {
 bool Renderer::createPipeline() {
     // 1. 루트 시그니처 생성 (비어 있는 루트 시그니처)
     {
+        D3D12_ROOT_PARAMETER rootParams[1] = {};
+
+        rootParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+        rootParams[0].Descriptor.ShaderRegister = 0; // register(b0)
+        rootParams[0].Descriptor.RegisterSpace = 0;
+        rootParams[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+
         D3D12_ROOT_SIGNATURE_DESC rootSigDesc = {};
+        rootSigDesc.NumParameters = 1;
+        rootSigDesc.pParameters = rootParams;
         rootSigDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
 
         Microsoft::WRL::ComPtr<ID3DBlob> signatureBlob;
@@ -149,6 +175,7 @@ bool Renderer::createPipeline() {
     psoDesc.VS = { vertexShader->GetBufferPointer(), vertexShader->GetBufferSize() };
     psoDesc.PS = { pixelShader->GetBufferPointer(), pixelShader->GetBufferSize() };
     psoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+    psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
     psoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
     psoDesc.DepthStencilState.DepthEnable = FALSE;
     psoDesc.DepthStencilState.StencilEnable = FALSE;
@@ -206,6 +233,8 @@ bool Renderer::createVertexBuffer() {
     vertexBufferView.StrideInBytes = sizeof(Vertex);
     vertexBufferView.SizeInBytes = vertexBufferSize;
 
+    
+
     return true;
 }
 
@@ -242,6 +271,7 @@ void Renderer::render() {
 
     // 5. 파이프라인 상태 설정
     commandList->SetGraphicsRootSignature(rootSignature.Get());
+    commandList->SetGraphicsRootConstantBufferView(0, constantBuffer->GetGPUVirtualAddress());
     commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     commandList->IASetVertexBuffers(0, 1, &vertexBufferView);
 
@@ -277,11 +307,28 @@ void Renderer::render() {
 }
 
 void Renderer::update() {
-    // 추후 애니메이션, 입력 등 로직을 여기에
+    using namespace DirectX;
+
+    static float angle = 0.0f;
+    angle += 0.01f;
+
+    XMMATRIX model = XMMatrixRotationY(angle);
+    XMMATRIX view = XMMatrixLookAtLH(
+        XMVectorSet(0.0f, 0.0f, -2.0f, 1.0f), // eye
+        XMVectorSet(0.0f, 0.0f, 0.0f, 1.0f),  // at
+        XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f)   // up
+    );
+    XMMATRIX proj = XMMatrixPerspectiveFovLH(XM_PIDIV4, windowWidth / (float)windowHeight, 0.1f, 100.0f);
+
+    mvpData.model = XMMatrixTranspose(model);
+    mvpData.view = XMMatrixTranspose(view);
+    mvpData.projection = XMMatrixTranspose(proj);
+
+    memcpy(constantBufferPtr, &mvpData, sizeof(MVP));
 }
 
 Renderer::~Renderer() {
-    waitForGPU(); // 동기화 (선택)
+    waitForGPU(); // 동기화
     
     if (fenceEvent) {
         CloseHandle(fenceEvent);
