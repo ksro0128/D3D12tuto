@@ -15,6 +15,10 @@ struct alignas(256) MVP
     XMMATRIX projection;
 };
 
+extern const int objectCount;
+extern const UINT indexCount;
+extern MVP mvpData[];
+
 
 class Renderer {
 public:
@@ -53,6 +57,11 @@ private:
     // 인덱스 버퍼
     Microsoft::WRL::ComPtr<ID3D12Resource> indexBuffer;
     D3D12_INDEX_BUFFER_VIEW indexBufferView = {};
+
+    // 디스크립터 힙 관련
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> cbvHeap;
+    D3D12_GPU_DESCRIPTOR_HANDLE cbvGpuHandleStart = {};
+    UINT cbvDescriptorSize = 0;
 
 
     // 상태

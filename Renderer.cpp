@@ -5,6 +5,10 @@
 #include <dxgidebug.h>
 #include <iostream>
 
+const int objectCount = 10;
+const UINT indexCount = 36;
+MVP mvpData[objectCount];
+
 bool Renderer::initialize(HWND hwnd) {
 #if defined(_DEBUG)
     {
@@ -86,7 +90,7 @@ bool Renderer::initialize(HWND hwnd) {
 
     // 상수 버퍼 생성
     CD3DX12_HEAP_PROPERTIES heapProps(D3D12_HEAP_TYPE_UPLOAD);
-    CD3DX12_RESOURCE_DESC cbDesc = CD3DX12_RESOURCE_DESC::Buffer((sizeof(MVP) + 255) & ~255);
+    CD3DX12_RESOURCE_DESC cbDesc = CD3DX12_RESOURCE_DESC::Buffer((sizeof(MVP) * objectCount + 255) & ~255);
 
     device->CreateCommittedResource(
         &heapProps,
@@ -101,6 +105,19 @@ bool Renderer::initialize(HWND hwnd) {
     CD3DX12_RANGE readRange(0, 0);
     constantBuffer->Map(0, &readRange, reinterpret_cast<void**>(&constantBufferPtr));
 
+
+    // 2. CBV 전용 디스크립터 힙 생성
+    D3D12_DESCRIPTOR_HEAP_DESC cbvHeapDesc = {};
+    cbvHeapDesc.NumDescriptors = objectCount;
+    cbvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    cbvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+
+    if (FAILED(device->CreateDescriptorHeap(&cbvHeapDesc, IID_PPV_ARGS(&cbvHeap)))) {
+        MessageBox(nullptr, L"CBV Heap 생성 실패", L"Error", MB_OK);
+        return false;
+    }
+
+
     // 파이프라인 생성
     if (!createPipeline()) return false;
 
@@ -114,16 +131,25 @@ bool Renderer::initialize(HWND hwnd) {
 bool Renderer::createPipeline() {
     // 1. 루트 시그니처 생성 (비어 있는 루트 시그니처)
     {
-        D3D12_ROOT_PARAMETER rootParams[1] = {};
+        // CBV range: register(b0)
+        D3D12_DESCRIPTOR_RANGE cbvRange = {};
+        cbvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_CBV;
+        cbvRange.NumDescriptors = 1;
+        cbvRange.BaseShaderRegister = 0;
+        cbvRange.RegisterSpace = 0;
+        cbvRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
 
-        rootParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
-        rootParams[0].Descriptor.ShaderRegister = 0; // register(b0)
-        rootParams[0].Descriptor.RegisterSpace = 0;
-        rootParams[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+        // 루트 파라미터 하나: descriptor table
+        D3D12_ROOT_PARAMETER rootParam = {};
+        rootParam.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        rootParam.DescriptorTable.NumDescriptorRanges = 1;
+        rootParam.DescriptorTable.pDescriptorRanges = &cbvRange;
+        rootParam.ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
 
+        // 루트 시그니처 전체 정의
         D3D12_ROOT_SIGNATURE_DESC rootSigDesc = {};
         rootSigDesc.NumParameters = 1;
-        rootSigDesc.pParameters = rootParams;
+        rootSigDesc.pParameters = &rootParam;
         rootSigDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
 
         Microsoft::WRL::ComPtr<ID3DBlob> signatureBlob;
@@ -136,7 +162,11 @@ bool Renderer::createPipeline() {
             return false;
         }
 
-        if (FAILED(device->CreateRootSignature(0, signatureBlob->GetBufferPointer(), signatureBlob->GetBufferSize(), IID_PPV_ARGS(&rootSignature)))) {
+        if (FAILED(device->CreateRootSignature(
+            0,
+            signatureBlob->GetBufferPointer(),
+            signatureBlob->GetBufferSize(),
+            IID_PPV_ARGS(&rootSignature)))) {
             return false;
         }
     }
@@ -272,6 +302,24 @@ bool Renderer::createVertexBuffer() {
         indexBufferView.SizeInBytes = indexBufferSize;
     }
 
+    // 3. CBV 생성
+    D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc = {};
+    cbvDesc.BufferLocation = constantBuffer->GetGPUVirtualAddress(); // 상수 버퍼 주소
+    UINT cbSize = (sizeof(MVP) + 255) & ~255;
+    for (UINT i = 0; i < objectCount; ++i) {
+        D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc = {};
+        cbvDesc.BufferLocation = constantBuffer->GetGPUVirtualAddress() + i * cbSize;
+        cbvDesc.SizeInBytes = cbSize;
+
+        CD3DX12_CPU_DESCRIPTOR_HANDLE handle(
+            cbvHeap->GetCPUDescriptorHandleForHeapStart(),
+            i,
+            device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV)
+        );
+        device->CreateConstantBufferView(&cbvDesc, handle);
+    }
+
+
     return true;
 }
 
@@ -309,13 +357,34 @@ void Renderer::render() {
 
     // 5. 파이프라인 상태 설정
     commandList->SetGraphicsRootSignature(rootSignature.Get());
-    commandList->SetGraphicsRootConstantBufferView(0, constantBuffer->GetGPUVirtualAddress());
+    // commandList->SetGraphicsRootConstantBufferView(0, constantBuffer->GetGPUVirtualAddress());
+    // 디스크립터 힙 바인딩 (CBV, SRV, UAV용 힙)
+    ID3D12DescriptorHeap* heaps[] = { cbvHeap.Get() };
+    commandList->SetDescriptorHeaps(_countof(heaps), heaps);
+
+    // 루트 파라미터에 CBV 디스크립터 테이블 설정
+    commandList->SetGraphicsRootDescriptorTable(
+        0, // 루트 파라미터 인덱스 (register(b0)에 해당)
+        cbvHeap->GetGPUDescriptorHandleForHeapStart()
+    );
     commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     commandList->IASetVertexBuffers(0, 1, &vertexBufferView);
     commandList->IASetIndexBuffer(&indexBufferView);
 
-    // 6. 드로우 호출
-    commandList->DrawIndexedInstanced(36, 1, 0, 0, 0);
+    for (UINT i = 0; i < objectCount; ++i) {
+        // 디스크립터 핸들 오프셋 계산
+        CD3DX12_GPU_DESCRIPTOR_HANDLE cbvHandle(
+            cbvHeap->GetGPUDescriptorHandleForHeapStart(),
+            i,
+            device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV)
+        );
+
+        // 루트 파라미터에 현재 오브젝트의 CBV 디스크립터 설정
+        commandList->SetGraphicsRootDescriptorTable(0, cbvHandle);
+
+        // 드로우 호출
+        commandList->DrawIndexedInstanced(indexCount, 1, 0, 0, 0);
+    }
 
     // 7. 백버퍼 상태: RenderTarget → Present
     barrier = CD3DX12_RESOURCE_BARRIER::Transition(
@@ -348,22 +417,37 @@ void Renderer::render() {
 void Renderer::update() {
     using namespace DirectX;
 
-    static float angle = 0.0f;
-    angle += 0.01f;
+    for (UINT i = 0; i < objectCount; ++i) {
+        float angle = 0.01f * i + static_cast<float>(GetTickCount64()) * 0.001f;
 
-    XMMATRIX model = XMMatrixRotationY(angle);
-    XMMATRIX view = XMMatrixLookAtLH(
-        XMVectorSet(0.0f, 0.0f, -2.0f, 1.0f), // eye
-        XMVectorSet(0.0f, 0.0f, 0.0f, 1.0f),  // at
-        XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f)   // up
-    );
-    XMMATRIX proj = XMMatrixPerspectiveFovLH(XM_PIDIV4, windowWidth / (float)windowHeight, 0.1f, 100.0f);
+        XMMATRIX model = XMMatrixTranslation(static_cast<float>(i) * 1.5f, 0.0f, 0.0f) *
+                         XMMatrixRotationY(angle);
 
-    mvpData.model = XMMatrixTranspose(model);
-    mvpData.view = XMMatrixTranspose(view);
-    mvpData.projection = XMMatrixTranspose(proj);
+        XMMATRIX view = XMMatrixLookAtLH(
+            XMVectorSet(0.0f, 0.0f, -4.0f, 1.0f),
+            XMVectorSet(0.0f, 0.0f, 0.0f, 1.0f),
+            XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f)
+        );
 
-    memcpy(constantBufferPtr, &mvpData, sizeof(MVP));
+        XMMATRIX proj = XMMatrixPerspectiveFovLH(
+            XM_PIDIV4,
+            static_cast<float>(windowWidth) / static_cast<float>(windowHeight),
+            0.1f, 100.0f
+        );
+
+        MVP mvp = {
+            XMMatrixTranspose(model),
+            XMMatrixTranspose(view),
+            XMMatrixTranspose(proj)
+        };
+
+        // 복사할 위치 계산
+        memcpy(
+            constantBufferPtr + i * sizeof(MVP),
+            &mvp,
+            sizeof(MVP)
+        );
+    }
 }
 
 Renderer::~Renderer() {
