@@ -50,6 +50,11 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Resource> vertexBuffer;
     D3D12_VERTEX_BUFFER_VIEW vertexBufferView = {};
 
+    // 인덱스 버퍼
+    Microsoft::WRL::ComPtr<ID3D12Resource> indexBuffer;
+    D3D12_INDEX_BUFFER_VIEW indexBufferView = {};
+
+
     // 상태
     UINT frameIndex = 0;
     UINT rtvDescriptorSize = 0;

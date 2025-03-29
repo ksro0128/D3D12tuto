@@ -195,48 +195,86 @@ bool Renderer::createPipeline() {
 
 bool Renderer::createVertexBuffer() {
     struct Vertex {
-        float position[3];
-        float color[3];
+        XMFLOAT3 position;
+        XMFLOAT3 color;
     };
 
-    Vertex triangleVertices[] = {
-        { { 0.0f,  0.5f, 0.0f }, { 1.0f, 0.0f, 0.0f } },
-        { { 0.5f, -0.5f, 0.0f }, { 0.0f, 1.0f, 0.0f } },
-        { {-0.5f, -0.5f, 0.0f }, { 0.0f, 0.0f, 1.0f } },
+    Vertex cubeVertices[] = {
+        {{-0.5f, -0.5f, -0.5f}, {1, 0, 0}}, // 0
+        {{-0.5f, +0.5f, -0.5f}, {0, 1, 0}}, // 1
+        {{+0.5f, +0.5f, -0.5f}, {0, 0, 1}}, // 2
+        {{+0.5f, -0.5f, -0.5f}, {1, 1, 0}}, // 3
+        {{-0.5f, -0.5f, +0.5f}, {1, 0, 1}}, // 4
+        {{-0.5f, +0.5f, +0.5f}, {0, 1, 1}}, // 5
+        {{+0.5f, +0.5f, +0.5f}, {1, 1, 1}}, // 6
+        {{+0.5f, -0.5f, +0.5f}, {0, 0, 0}}, // 7
     };
 
-    const UINT vertexBufferSize = sizeof(triangleVertices);
+    uint16_t cubeIndices[] = {
+        0, 1, 2, 0, 2, 3,       // front
+        4, 6, 5, 4, 7, 6,       // back
+        4, 5, 1, 4, 1, 0,       // left
+        3, 2, 6, 3, 6, 7,       // right
+        1, 5, 6, 1, 6, 2,       // top
+        4, 0, 3, 4, 3, 7        // bottom
+    };
 
-    // 1. 업로드 힙에 버퍼 생성
-    CD3DX12_HEAP_PROPERTIES heapProps(D3D12_HEAP_TYPE_UPLOAD);
-    CD3DX12_RESOURCE_DESC bufferDesc = CD3DX12_RESOURCE_DESC::Buffer(vertexBufferSize);
+    const UINT vertexBufferSize = sizeof(cubeVertices);
+    const UINT indexBufferSize = sizeof(cubeIndices);
 
-    if (FAILED(device->CreateCommittedResource(
-        &heapProps,
-        D3D12_HEAP_FLAG_NONE,
-        &bufferDesc,
-        D3D12_RESOURCE_STATE_GENERIC_READ,
-        nullptr,
-        IID_PPV_ARGS(&vertexBuffer)))) {
-        return false;
+    // 정점 버퍼 생성
+    {
+        CD3DX12_HEAP_PROPERTIES heapProps(D3D12_HEAP_TYPE_UPLOAD);
+        CD3DX12_RESOURCE_DESC bufferDesc = CD3DX12_RESOURCE_DESC::Buffer(vertexBufferSize);
+
+        if (FAILED(device->CreateCommittedResource(
+            &heapProps,
+            D3D12_HEAP_FLAG_NONE,
+            &bufferDesc,
+            D3D12_RESOURCE_STATE_GENERIC_READ,
+            nullptr,
+            IID_PPV_ARGS(&vertexBuffer)))) {
+            return false;
+        }
+
+        void* mappedData = nullptr;
+        vertexBuffer->Map(0, nullptr, &mappedData);
+        memcpy(mappedData, cubeVertices, vertexBufferSize);
+        vertexBuffer->Unmap(0, nullptr);
+
+        vertexBufferView.BufferLocation = vertexBuffer->GetGPUVirtualAddress();
+        vertexBufferView.StrideInBytes = sizeof(Vertex);
+        vertexBufferView.SizeInBytes = vertexBufferSize;
     }
 
-    // 2. 정점 데이터 업로드
-    UINT8* mappedData = nullptr;
-    CD3DX12_RANGE readRange(0, 0); // 읽지는 않음
-    vertexBuffer->Map(0, &readRange, reinterpret_cast<void**>(&mappedData));
-    memcpy(mappedData, triangleVertices, vertexBufferSize);
-    vertexBuffer->Unmap(0, nullptr);
+    // 인덱스 버퍼 생성
+    {
+        CD3DX12_HEAP_PROPERTIES heapProps(D3D12_HEAP_TYPE_UPLOAD);
+        CD3DX12_RESOURCE_DESC bufferDesc = CD3DX12_RESOURCE_DESC::Buffer(indexBufferSize);
 
-    // 3. VertexBufferView 설정
-    vertexBufferView.BufferLocation = vertexBuffer->GetGPUVirtualAddress();
-    vertexBufferView.StrideInBytes = sizeof(Vertex);
-    vertexBufferView.SizeInBytes = vertexBufferSize;
+        if (FAILED(device->CreateCommittedResource(
+            &heapProps,
+            D3D12_HEAP_FLAG_NONE,
+            &bufferDesc,
+            D3D12_RESOURCE_STATE_GENERIC_READ,
+            nullptr,
+            IID_PPV_ARGS(&indexBuffer)))) {
+            return false;
+        }
 
-    
+        void* mappedData = nullptr;
+        indexBuffer->Map(0, nullptr, &mappedData);
+        memcpy(mappedData, cubeIndices, indexBufferSize);
+        indexBuffer->Unmap(0, nullptr);
+
+        indexBufferView.BufferLocation = indexBuffer->GetGPUVirtualAddress();
+        indexBufferView.Format = DXGI_FORMAT_R16_UINT;
+        indexBufferView.SizeInBytes = indexBufferSize;
+    }
 
     return true;
 }
+
 
 
 void Renderer::render() {
@@ -274,9 +312,10 @@ void Renderer::render() {
     commandList->SetGraphicsRootConstantBufferView(0, constantBuffer->GetGPUVirtualAddress());
     commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     commandList->IASetVertexBuffers(0, 1, &vertexBufferView);
+    commandList->IASetIndexBuffer(&indexBufferView);
 
     // 6. 드로우 호출
-    commandList->DrawInstanced(3, 1, 0, 0);
+    commandList->DrawIndexedInstanced(36, 1, 0, 0, 0);
 
     // 7. 백버퍼 상태: RenderTarget → Present
     barrier = CD3DX12_RESOURCE_BARRIER::Transition(
