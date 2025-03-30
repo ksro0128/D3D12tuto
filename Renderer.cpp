@@ -4,8 +4,9 @@
 #include "d3dx12.h"
 #include <dxgidebug.h>
 #include <iostream>
+#include <DirectXTex.h>
 
-const int objectCount = 10;
+const int objectCount = 1;
 const UINT indexCount = 36;
 MVP mvpData[objectCount];
 
@@ -47,8 +48,8 @@ bool Renderer::initialize(HWND hwnd) {
     // 스왑체인
     DXGI_SWAP_CHAIN_DESC1 swapDesc = {};
     swapDesc.BufferCount = frameCount;
-    swapDesc.Width = 1280;
-    swapDesc.Height = 720;
+    swapDesc.Width = windowWidth;
+    swapDesc.Height = windowHeight;
     swapDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
     swapDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
     swapDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
@@ -105,24 +106,144 @@ bool Renderer::initialize(HWND hwnd) {
     CD3DX12_RANGE readRange(0, 0);
     constantBuffer->Map(0, &readRange, reinterpret_cast<void**>(&constantBufferPtr));
 
+    // cbvsrv 힙 생성
+    D3D12_DESCRIPTOR_HEAP_DESC cbvsrvHeapDesc = {};
+    cbvsrvHeapDesc.NumDescriptors = objectCount + 1;
+    cbvsrvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    cbvsrvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
 
-    // 2. CBV 전용 디스크립터 힙 생성
-    D3D12_DESCRIPTOR_HEAP_DESC cbvHeapDesc = {};
-    cbvHeapDesc.NumDescriptors = objectCount;
-    cbvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    cbvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-
-    if (FAILED(device->CreateDescriptorHeap(&cbvHeapDesc, IID_PPV_ARGS(&cbvHeap)))) {
-        MessageBox(nullptr, L"CBV Heap 생성 실패", L"Error", MB_OK);
+    if (FAILED(device->CreateDescriptorHeap(&cbvsrvHeapDesc, IID_PPV_ARGS(&cbvsrvHeap)))) {
+        MessageBox(nullptr, L"CBV SRV Heap 생성 실패", L"Error", MB_OK);
         return false;
     }
 
+    // 텍스처 생성
+    if (!createTexture()) return false;
 
     // 파이프라인 생성
     if (!createPipeline()) return false;
 
     // 정점 버퍼 생성
     if (!createVertexBuffer()) return false;
+
+    return true;
+}
+
+bool Renderer::createTexture() {
+    using namespace DirectX;
+
+    // 1. 텍스처 로딩
+    ScratchImage image;
+    HRESULT hr = LoadFromWICFile(L"textures/texture.png", WIC_FLAGS_NONE, nullptr, image);
+    if (FAILED(hr)) {
+        MessageBox(nullptr, L"텍스처 로드 실패", L"Error", MB_OK);
+        return false;
+    }
+
+    const Image* img = image.GetImage(0, 0, 0);
+
+    // 2. 리소스 생성
+    D3D12_RESOURCE_DESC texDesc = {};
+    texDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    texDesc.Width = img->width;
+    texDesc.Height = static_cast<UINT>(img->height);
+    texDesc.DepthOrArraySize = 1;
+    texDesc.MipLevels = 1;
+    texDesc.Format = img->format;
+    texDesc.SampleDesc.Count = 1;
+    texDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    texDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
+
+    CD3DX12_HEAP_PROPERTIES defaultHeap(D3D12_HEAP_TYPE_DEFAULT);
+    if (FAILED(device->CreateCommittedResource(
+        &defaultHeap,
+        D3D12_HEAP_FLAG_NONE,
+        &texDesc,
+        D3D12_RESOURCE_STATE_COPY_DEST,
+        nullptr,
+        IID_PPV_ARGS(&texture)))) {
+        return false;
+    }
+    
+    // 3. 업로드 힙 생성
+    Microsoft::WRL::ComPtr<ID3D12Resource> textureUploadHeap;
+    UINT64 uploadBufferSize = GetRequiredIntermediateSize(texture.Get(), 0, 1);
+
+    CD3DX12_HEAP_PROPERTIES uploadHeap(D3D12_HEAP_TYPE_UPLOAD);
+    CD3DX12_RESOURCE_DESC uploadDesc = CD3DX12_RESOURCE_DESC::Buffer(uploadBufferSize);
+
+    if (FAILED(device->CreateCommittedResource(
+        &uploadHeap,
+        D3D12_HEAP_FLAG_NONE,
+        &uploadDesc,
+        D3D12_RESOURCE_STATE_GENERIC_READ,
+        nullptr,
+        IID_PPV_ARGS(&textureUploadHeap)))) {
+        return false;
+    }
+
+    // 4. 텍스처 복사
+    D3D12_SUBRESOURCE_DATA textureData = {};
+    textureData.pData = img->pixels;
+    textureData.RowPitch = img->rowPitch;
+    textureData.SlicePitch = img->slicePitch;
+
+    commandAllocator->Reset();
+    commandList->Reset(commandAllocator.Get(), nullptr);
+    UpdateSubresources(commandList.Get(), texture.Get(), textureUploadHeap.Get(), 0, 0, 1, &textureData);
+
+    // 5. 리소스 상태 전이
+    CD3DX12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::Transition(
+        texture.Get(),
+        D3D12_RESOURCE_STATE_COPY_DEST,
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE
+    );
+    commandList->ResourceBarrier(1, &barrier);
+    commandList->Close();
+
+    ID3D12CommandList* lists[] = { commandList.Get() };
+    commandQueue->ExecuteCommandLists(1, lists);
+
+    commandQueue->Signal(fence.Get(), fenceValue);
+    waitForGPU(); // GPU가 전이 끝날 때까지 대기
+    fenceValue++;
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+    srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srvDesc.Format = texDesc.Format;
+    srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srvDesc.Texture2D.MipLevels = 1;
+
+    CD3DX12_CPU_DESCRIPTOR_HANDLE srvHandle(
+        cbvsrvHeap->GetCPUDescriptorHandleForHeapStart(),
+        objectCount,
+        device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV)
+    );
+
+    device->CreateShaderResourceView(
+        texture.Get(),
+        &srvDesc,
+        srvHandle
+    );
+
+    // 7. 샘플러 디스크립터 힙 생성
+    D3D12_DESCRIPTOR_HEAP_DESC samplerHeapDesc = {};
+    samplerHeapDesc.NumDescriptors = 1;
+    samplerHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER;
+    samplerHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+
+    if (FAILED(device->CreateDescriptorHeap(&samplerHeapDesc, IID_PPV_ARGS(&samplerHeap)))) {
+        return false;
+    }
+
+    D3D12_SAMPLER_DESC samplerDesc = {};
+    samplerDesc.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    samplerDesc.AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    samplerDesc.AddressV = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    samplerDesc.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    samplerDesc.MaxLOD = D3D12_FLOAT32_MAX;
+
+    device->CreateSampler(&samplerDesc, samplerHeap->GetCPUDescriptorHandleForHeapStart());
 
     return true;
 }
@@ -139,17 +260,45 @@ bool Renderer::createPipeline() {
         cbvRange.RegisterSpace = 0;
         cbvRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
 
-        // 루트 파라미터 하나: descriptor table
-        D3D12_ROOT_PARAMETER rootParam = {};
-        rootParam.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-        rootParam.DescriptorTable.NumDescriptorRanges = 1;
-        rootParam.DescriptorTable.pDescriptorRanges = &cbvRange;
-        rootParam.ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+        D3D12_DESCRIPTOR_RANGE srvRange = {};
+        srvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        srvRange.NumDescriptors = 1;
+        srvRange.BaseShaderRegister = 0; // t0
+        srvRange.RegisterSpace = 0;
+        srvRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+        D3D12_DESCRIPTOR_RANGE samplerRange = {};
+        samplerRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
+        samplerRange.NumDescriptors = 1;
+        samplerRange.BaseShaderRegister = 0; // s0
+        samplerRange.RegisterSpace = 0;
+        samplerRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+        // 루트 파라미터 3개 정의
+        D3D12_ROOT_PARAMETER rootParams[3] = {};
+
+        // CBV table (b0)
+        rootParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        rootParams[0].DescriptorTable.NumDescriptorRanges = 1;
+        rootParams[0].DescriptorTable.pDescriptorRanges = &cbvRange;
+        rootParams[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+
+        // SRV table (t0)
+        rootParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        rootParams[1].DescriptorTable.NumDescriptorRanges = 1;
+        rootParams[1].DescriptorTable.pDescriptorRanges = &srvRange;
+        rootParams[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+        // Sampler table (s0)
+        rootParams[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        rootParams[2].DescriptorTable.NumDescriptorRanges = 1;
+        rootParams[2].DescriptorTable.pDescriptorRanges = &samplerRange;
+        rootParams[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
         // 루트 시그니처 전체 정의
         D3D12_ROOT_SIGNATURE_DESC rootSigDesc = {};
-        rootSigDesc.NumParameters = 1;
-        rootSigDesc.pParameters = &rootParam;
+        rootSigDesc.NumParameters = 3;
+        rootSigDesc.pParameters = rootParams;
         rootSigDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
 
         Microsoft::WRL::ComPtr<ID3DBlob> signatureBlob;
@@ -194,7 +343,9 @@ bool Renderer::createPipeline() {
     D3D12_INPUT_ELEMENT_DESC inputLayout[] = {
         { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,
           D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-        { "COLOR", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12,
+        { "NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12,
+          D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+        { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 24,
           D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
     };
 
@@ -226,27 +377,45 @@ bool Renderer::createPipeline() {
 bool Renderer::createVertexBuffer() {
     struct Vertex {
         XMFLOAT3 position;
-        XMFLOAT3 color;
+        XMFLOAT3 normal;
+        XMFLOAT2 uv;
     };
 
     Vertex cubeVertices[] = {
-        {{-0.5f, -0.5f, -0.5f}, {1, 0, 0}}, // 0
-        {{-0.5f, +0.5f, -0.5f}, {0, 1, 0}}, // 1
-        {{+0.5f, +0.5f, -0.5f}, {0, 0, 1}}, // 2
-        {{+0.5f, -0.5f, -0.5f}, {1, 1, 0}}, // 3
-        {{-0.5f, -0.5f, +0.5f}, {1, 0, 1}}, // 4
-        {{-0.5f, +0.5f, +0.5f}, {0, 1, 1}}, // 5
-        {{+0.5f, +0.5f, +0.5f}, {1, 1, 1}}, // 6
-        {{+0.5f, -0.5f, +0.5f}, {0, 0, 0}}, // 7
+        {{-0.5f, -0.5f, -0.5f}, {0.0f, 0.0f, -1.0f}, {0.0f, 0.0f}},
+        {{0.5f, -0.5f, -0.5f}, {0.0f, 0.0f, -1.0f}, {1.0f, 0.0f}},
+        {{0.5f, 0.5f, -0.5f}, {0.0f, 0.0f, -1.0f}, {1.0f, 1.0f}},
+        {{-0.5f, 0.5f, -0.5f}, {0.0f, 0.0f, -1.0f}, {0.0f, 1.0f}},
+        
+        {{-0.5f, -0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}, {0.0f, 0.0f}},
+        {{0.5f, -0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}, {1.0f, 0.0f}},
+        {{0.5f, 0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}, {1.0f, 1.0f}},
+        {{-0.5f, 0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}, {0.0f, 1.0f}},
+        
+        {{-0.5f, -0.5f, -0.5f}, {-1.0f, 0.0f, 0.0f}, {0.0f, 0.0f}},
+        {{-0.5f, -0.5f, 0.5f}, {-1.0f, 0.0f, 0.0f}, {1.0f, 0.0f}},
+        {{-0.5f, 0.5f, 0.5f}, {-1.0f, 0.0f, 0.0f}, {1.0f, 1.0f}},
+        {{-0.5f, 0.5f, -0.5f}, {-1.0f, 0.0f, 0.0f}, {0.0f, 1.0f}},
+        
+        {{0.5f, -0.5f, -0.5f}, {1.0f, 0.0f, 0.0f}, {0.0f, 0.0f}},
+        {{0.5f, -0.5f, 0.5f}, {1.0f, 0.0f, 0.0f}, {1.0f, 0.0f}},
+        {{0.5f, 0.5f, 0.5f}, {1.0f, 0.0f, 0.0f}, {1.0f, 1.0f}},
+        {{0.5f, 0.5f, -0.5f}, {1.0f, 0.0f, 0.0f}, {0.0f, 1.0f}},
+        
+        {{-0.5f, -0.5f, -0.5f}, {0.0f, -1.0f, 0.0f}, {0.0f, 0.0f}},
+        {{0.5f, -0.5f, -0.5f}, {0.0f, -1.0f, 0.0f}, {1.0f, 0.0f}},
+        {{0.5f, -0.5f, 0.5f}, {0.0f, -1.0f, 0.0f}, {1.0f, 1.0f}},
+        {{-0.5f, -0.5f, 0.5f}, {0.0f, -1.0f, 0.0f}, {0.0f, 1.0f}},
+        
+        {{-0.5f, 0.5f, -0.5f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f}},
+        {{0.5f, 0.5f, -0.5f}, {0.0f, 1.0f, 0.0f}, {1.0f, 0.0f}},
+        {{0.5f, 0.5f, 0.5f}, {0.0f, 1.0f, 0.0f}, {1.0f, 1.0f}},
+        {{-0.5f, 0.5f, 0.5f}, {0.0f, 1.0f, 0.0f}, {0.0f, 1.0f}},
     };
 
     uint16_t cubeIndices[] = {
-        0, 1, 2, 0, 2, 3,       // front
-        4, 6, 5, 4, 7, 6,       // back
-        4, 5, 1, 4, 1, 0,       // left
-        3, 2, 6, 3, 6, 7,       // right
-        1, 5, 6, 1, 6, 2,       // top
-        4, 0, 3, 4, 3, 7        // bottom
+        0,	2,	1,	2,	0,	3,	4,	5,	6,	6,	7,	4,	8,	9,	10, 10, 11, 8,
+		12, 14, 13, 14, 12, 15, 16, 17, 18, 18, 19, 16, 20, 22, 21, 22, 20, 23,
     };
 
     const UINT vertexBufferSize = sizeof(cubeVertices);
@@ -312,14 +481,12 @@ bool Renderer::createVertexBuffer() {
         cbvDesc.SizeInBytes = cbSize;
 
         CD3DX12_CPU_DESCRIPTOR_HANDLE handle(
-            cbvHeap->GetCPUDescriptorHandleForHeapStart(),
+            cbvsrvHeap->GetCPUDescriptorHandleForHeapStart(),
             i,
             device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV)
         );
         device->CreateConstantBufferView(&cbvDesc, handle);
     }
-
-
     return true;
 }
 
@@ -357,16 +524,33 @@ void Renderer::render() {
 
     // 5. 파이프라인 상태 설정
     commandList->SetGraphicsRootSignature(rootSignature.Get());
-    // commandList->SetGraphicsRootConstantBufferView(0, constantBuffer->GetGPUVirtualAddress());
+    
     // 디스크립터 힙 바인딩 (CBV, SRV, UAV용 힙)
-    ID3D12DescriptorHeap* heaps[] = { cbvHeap.Get() };
+    ID3D12DescriptorHeap* heaps[] = { cbvsrvHeap.Get(), samplerHeap.Get() };
     commandList->SetDescriptorHeaps(_countof(heaps), heaps);
 
     // 루트 파라미터에 CBV 디스크립터 테이블 설정
     commandList->SetGraphicsRootDescriptorTable(
         0, // 루트 파라미터 인덱스 (register(b0)에 해당)
-        cbvHeap->GetGPUDescriptorHandleForHeapStart()
+        cbvsrvHeap->GetGPUDescriptorHandleForHeapStart()
     );
+
+    CD3DX12_GPU_DESCRIPTOR_HANDLE srvHandle(
+        cbvsrvHeap->GetGPUDescriptorHandleForHeapStart(),
+        objectCount,
+        device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV)
+    );
+    commandList->SetGraphicsRootDescriptorTable(
+        1,
+        srvHandle
+    );
+
+    // 루트 파라미터에 샘플러 디스크립터 테이블 설정
+    commandList->SetGraphicsRootDescriptorTable(
+        2, // 루트 파라미터 인덱스 (register(s0)에 해당)
+        samplerHeap->GetGPUDescriptorHandleForHeapStart()
+    );
+
     commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     commandList->IASetVertexBuffers(0, 1, &vertexBufferView);
     commandList->IASetIndexBuffer(&indexBufferView);
@@ -374,7 +558,7 @@ void Renderer::render() {
     for (UINT i = 0; i < objectCount; ++i) {
         // 디스크립터 핸들 오프셋 계산
         CD3DX12_GPU_DESCRIPTOR_HANDLE cbvHandle(
-            cbvHeap->GetGPUDescriptorHandleForHeapStart(),
+            cbvsrvHeap->GetGPUDescriptorHandleForHeapStart(),
             i,
             device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV)
         );

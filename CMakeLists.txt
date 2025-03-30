@@ -4,6 +4,12 @@ project(DirectXWindow)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# 외부 라이브러리 경로 설정
+set(DIRECTXTEX_DIR ${CMAKE_SOURCE_DIR}/External/DirectXTex)
+
+# DirectXTex 추가
+add_subdirectory(${DIRECTXTEX_DIR} DirectXTex_build)
+
 # 유니코드 설정
 add_definitions(-DUNICODE -D_UNICODE)
 
@@ -24,4 +30,5 @@ target_link_libraries(DirectXWindow
     dxgi
     dxguid
     d3dcompiler
+    DirectXTex
 )

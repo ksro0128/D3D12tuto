@@ -5,14 +5,19 @@ cbuffer MVPBuffer : register(b0)
     matrix projection;
 };
 
+Texture2D tex : register(t0);
+SamplerState samp : register(s0);
+
 struct VSInput {
     float3 position : POSITION;
-    float3 color : COLOR;
+    float3 normal : NORMAL;
+    float2 uv : TEXCOORD;
 };
 
 struct VSOutput {
     float4 position : SV_POSITION;
-    float3 color : COLOR;
+    float3 normal : NORMAL;
+    float2 uv : TEXCOORD;
 };
 
 VSOutput VSMain(VSInput input) {
@@ -21,11 +26,12 @@ VSOutput VSMain(VSInput input) {
     float4 worldPos = mul(float4(input.position, 1.0f), model);
     float4 viewPos  = mul(worldPos, view);
     output.position = mul(viewPos, projection);
-
-    output.color = input.color;
+    output.uv = input.uv;
+    output.normal = input.normal;
     return output;
 }
 
 float4 PSMain(VSOutput input) : SV_TARGET {
-    return float4(input.color, 1.0f);
+    float4 texColor = tex.Sample(samp, input.uv);
+    return texColor;
 }
